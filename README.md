@@ -1,1 +1,1 @@
-# bounty-ai
+# BI-model-v2.0

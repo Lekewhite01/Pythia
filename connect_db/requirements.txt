@@ -1,0 +1,8 @@
+fastapi[all] 
+sqlalchemy 
+psycopg2-binary 
+snowflake-connector-python 
+mysql-connector-python
+snowflake-sqlalchemy
+pydantic
+uvicorn
