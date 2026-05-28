@@ -1,0 +1,80 @@
+graph TB
+    subgraph DS["DATA SOURCES"]
+        TX["Transaction Streams"]
+        CP["Customer Profiles"]
+        SP["Sanctions / PEP Lists"]
+    end
+
+    subgraph FP["FEATURE PIPELINE"]
+        FE["Apache Airflow: Feature Engineering"]
+        FE_D["Velocity · Amount Patterns · Behavioral Deviations · Account Signals"]
+    end
+
+    subgraph ML["ML MODELS — Trained on African Transaction Data"]
+        AD["Anomaly Detection"]
+        AML["AML Screening"]
+        RS["Risk Scoring"]
+        AD_D["XGBoost / Isolation Forest"]
+        AML_D["Sanctions & PEP Matching"]
+        RS_D["Contextual Fraud Patterns"]
+    end
+
+    subgraph SL["SERVING LAYER"]
+        API["FastAPI Scoring API"]
+        API_D["Docker / Kubernetes · Sub-second Latency · Explainable Alerts"]
+        TH["Configurable Thresholds"]
+    end
+
+    subgraph OUT["OUTPUTS"]
+        CD["Compliance Dashboard"]
+        AN["Alert Notifications"]
+        RR["Regulatory Reports"]
+    end
+
+    subgraph MON["MONITORING & FEEDBACK LOOP"]
+        MD["Model Drift Detection"]
+        PM["Performance Metrics"]
+        FPT["False Positive Tracking"]
+        AR["Automated Retraining"]
+    end
+
+    TX --> FE
+    CP --> FE
+    SP --> FE
+    FE --> FE_D
+
+    FE_D --> AD
+    FE_D --> AML
+    FE_D --> RS
+    AD --> AD_D
+    AML --> AML_D
+    RS --> RS_D
+
+    AD_D --> API
+    AML_D --> API
+    RS_D --> API
+    API --> API_D
+    API --> TH
+
+    API_D --> CD
+    API_D --> AN
+    API_D --> RR
+
+    MON -.->|"feedback"| FP
+    MON -.->|"retrigger"| ML
+    API -.->|"logs & metrics"| MON
+
+    classDef source fill:#f8f9fa,stroke:#6c757d,stroke-width:1.5px,color:#333
+    classDef pipeline fill:#EBF5FB,stroke:#2E86C1,stroke-width:1.5px,color:#1B4F72
+    classDef model fill:#FDEBD0,stroke:#E67E22,stroke-width:1.5px,color:#7E5109
+    classDef serving fill:#E8F8F5,stroke:#1ABC9C,stroke-width:1.5px,color:#0E6655
+    classDef output fill:#F4ECF7,stroke:#8E44AD,stroke-width:1.5px,color:#6C3483
+    classDef monitor fill:#FADBD8,stroke:#E74C3C,stroke-width:1.5px,color:#922B21
+    classDef detail fill:none,stroke:none,color:#666,font-size:10px
+
+    class TX,CP,SP source
+    class FE,FE_D pipeline
+    class AD,AML,RS,AD_D,AML_D,RS_D model
+    class API,API_D,TH serving
+    class CD,AN,RR output
+    class MD,PM,FPT,AR monitor
