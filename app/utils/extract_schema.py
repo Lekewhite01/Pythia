@@ -180,7 +180,7 @@ def main():
     pg_password = config['bipassword']
 
     # Output excel spreadsheet
-    output_file = "bounty_database_schema_metadata.xlsx"
+    output_file = "pythia_database_schema_metadata.xlsx"
 
     # Connect to PostgreSQL
     conn = connect_to_postgres(pg_host, pg_database, pg_user, pg_password)

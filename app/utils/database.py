@@ -1,132 +1,156 @@
+"""
+Database engine setup and lightweight query helpers.
+
+This module wires up two SQLAlchemy engines from the credentials in
+``secrets.yaml``:
+
+    * ``engine``      — points at the BI database (the canonical analytics
+      warehouse the role-based dashboard queries run against).
+    * ``demo_engine`` — points at the demo database used by the
+      ``/convert-nl-to-sql`` and CSV-upload endpoints.
+
+It also exposes a handful of small helpers that wrap the most common
+introspection / read patterns so the route handlers stay tidy.
+"""
+
 from sqlalchemy import create_engine, inspect
 from sqlalchemy import text
 import pandas as pd
 import yaml
-# import sys
-# sys.path.append('..')
 
-# Function to load configuration from a YAML file
+
 def load_config(config_file):
+    """Read a YAML configuration file from disk and return it as a dict."""
     with open(config_file, 'r') as file:
         config = yaml.safe_load(file)
     return config
 
-# Load the configuration
+
+# Credentials and other secrets are kept in ``secrets.yaml`` so they don't
+# leak into source control. NOTE: in production, prefer environment variables
+# or a managed secret store (e.g. AWS Secrets Manager) over a YAML file.
 config = load_config('secrets.yaml')
 
-# For the General DB instance
-# dbname = config['dbname']
-# user = config['user']
-# password = config['password']
-# host = config['host'] 
-# port = config['port']
-# DATABASE_URL = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{dbname}"
-
-# For the BI DB instance
+# ---------------------------------------------------------------------------
+# BI database (default analytics target)
+# ---------------------------------------------------------------------------
 dbname = config['bidbname']
 user = config['biuser']
 password = config['bipassword']
-host = config['bihost'] 
+host = config['bihost']
 port = config['port']
 DATABASE_URL = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{dbname}"
 
-# Create SQLAlchemy engine for Postgres database
 engine = create_engine(DATABASE_URL)
 
-# For demo (Players an withdrawals)
+# ---------------------------------------------------------------------------
+# Demo database (used by NL-to-SQL and CSV-upload flows)
+# ---------------------------------------------------------------------------
 demo_dbname = config['demodbname']
 demo_user = config['demouser']
 demo_password = config['demopassword']
-demo_host = config['demohost'] 
+demo_host = config['demohost']
 demo_port = config['port']
-demo_DATABASE_URL = f"postgresql+psycopg2://{demo_user}:{demo_password}@{demo_host}:{port}/{demo_dbname}"
-
+demo_DATABASE_URL = (
+    f"postgresql+psycopg2://{demo_user}:{demo_password}"
+    f"@{demo_host}:{port}/{demo_dbname}"
+)
 
 demo_engine = create_engine(demo_DATABASE_URL)
 
+
 def get_demo_db():
     """
-    Create and return a SQLAlchemy database engine.
+    Return a SQLAlchemy inspector for the demo database.
 
-    Returns:
-    - sqlalchemy.engine.base.Engine: An instance of the SQLAlchemy database engine.
+    Wrapped as a function so it can be used as a FastAPI dependency
+    (``Depends(get_demo_db)``), giving each request its own inspector handle.
     """
     db = inspect(demo_engine)
     return db
 
+
 def get_db():
     """
-    Create and return a SQLAlchemy database engine.
+    Return a SQLAlchemy inspector for the BI database.
 
-    Returns:
-    - sqlalchemy.engine.base.Engine: An instance of the SQLAlchemy database engine.
+    Wrapped as a function for the same reason as :func:`get_demo_db` — it
+    plugs straight into FastAPI's dependency-injection system.
     """
     db = inspect(engine)
     return db
 
+
 def get_tables_in_creation_order(engine):
     """
-    Retrieve a list of table names in the database in the order they were created.
+    Return all table names in the given database.
 
-    Parameters:
-    - engine (sqlalchemy.engine.base.Engine): The SQLAlchemy engine connected to the database.
+    Parameters
+    ----------
+    engine : sqlalchemy.engine.base.Engine
+        The SQLAlchemy engine (or inspector) connected to the database.
 
-    Returns:
-    - list: A list of table names in the order they were created.
+    Returns
+    -------
+    list[str]
+        Table names, in the order the inspector reports them — for most
+        backends this corresponds to creation order.
     """
-    # Create an inspector for the provided engine
     inspector = inspect(engine)
-
-    # Get a list of table names in the database
     table_names = inspector.get_table_names()
-
     return table_names
 
 
 def query_to_dataframe(db, table_name: str):
     """
-    Executes an SQL query to fetch a limited number of rows from a specified table
-    using a PGInspector object and returns the results as a DataFrame.
+    Return a 5-row preview of ``table_name`` as a pandas DataFrame.
 
-    Parameters:
-        db: The database object (assumed to be a PGInspector or similar)
-        table_name (str): The name of the table from which data will be fetched.
+    Designed for the frontend's "show me a sample" feature — we cap the
+    result at 5 rows to keep the payload small.
 
-    Returns:
-        pandas.DataFrame: A DataFrame containing the limited results of the SQL query.
+    Parameters
+    ----------
+    db : sqlalchemy inspector
+        Inspector bound to the target engine.
+    table_name : str
+        Name of the table to preview.
 
-    Raises:
-        sqlalchemy.exc.SQLAlchemyError: If there is an error executing the SQL query.
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame containing the first 5 rows of the table.
+
+    Raises
+    ------
+    sqlalchemy.exc.SQLAlchemyError
+        If the underlying query fails.
     """
-    # Constructing the SQL query to select all columns from the specified table with a limit of 5 rows
     sql_query = text(f"SELECT * FROM {table_name} LIMIT 5")
 
-    # Execute the query using the db object's execute method
+    # Use the bound engine to open a short-lived connection.
     with db.bind.connect() as conn:
         result = conn.execute(sql_query)
         df = pd.DataFrame(result.fetchall(), columns=result.keys())
 
     return df
 
+
 def read_table(table_name: str) -> pd.DataFrame:
     """
-    Fetches data from the specified database table and returns it as a pandas DataFrame.
+    Load an entire table from the BI database into a pandas DataFrame.
 
-    This function uses SQLAlchemy to connect to a database, reads the entire table 
-    specified by the table_name parameter, and loads it into a pandas DataFrame.
+    Useful when the LLM needs to inspect the actual contents of a table
+    (e.g. when suggesting analytical questions).
 
-    Parameters:
+    Parameters
     ----------
     table_name : str
-        The name of the table to be fetched from the database.
+        The name of the table to fetch.
 
-    Returns:
+    Returns
     -------
-    pd.DataFrame
-        A DataFrame containing the data from the specified table.
+    pandas.DataFrame
+        DataFrame containing every row of the requested table.
     """
-    # Use pandas to read the specified table from the database
     df = pd.read_sql_table(table_name, engine)
-    
-    # Return the resulting DataFrame
     return df

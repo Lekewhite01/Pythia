@@ -1,8 +1,8 @@
 version = 0.1
 [default.deploy.parameters]
-stack_name = "bounty-python-backend"
+stack_name = "pythia-python-backend"
 resolve_s3 = true
-s3_prefix = "bounty-python-backend"
+s3_prefix = "pythia-python-backend"
 region = "us-east-1"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"

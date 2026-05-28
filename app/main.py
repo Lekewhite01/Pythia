@@ -1,9 +1,23 @@
+"""
+Application entry point for the natural-language analytics backend.
+
+This FastAPI application exposes endpoints that:
+    * Translate natural-language prompts into SQL using OpenAI + Instructor,
+    * Execute generated queries against a connected PostgreSQL database,
+    * Return SQL, a plain-English answer, and chart-ready visualization data,
+    * Support role-based BI dashboard prefab questions, and
+    * Allow CSV uploads to be persisted as database tables.
+
+The module is deployable both as a standard ASGI service (via Uvicorn/Gunicorn)
+and as an AWS Lambda function (via Mangum).
+"""
+
 import json
-from fastapi import (FastAPI, 
-                     HTTPException, 
-                     Depends, 
-                     File, 
-                     UploadFile, 
+from fastapi import (FastAPI,
+                     HTTPException,
+                     Depends,
+                     File,
+                     UploadFile,
                      Form)
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -29,29 +43,38 @@ import logging
 import instructor
 import sqlalchemy as sa
 
-# Configure logger
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+# A request-scoped logger that prefixes every record with a request_id so that
+# concurrent invocations (especially inside Lambda) can be correlated.
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# Create a custom formatter that includes timestamp and request ID
 formatter = logging.Formatter(
     '%(asctime)s - %(name)s - %(levelname)s - [%(request_id)s] - %(message)s'
 )
 
-# Add handlers if needed (console, file, etc.)
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
+# ---------------------------------------------------------------------------
+# OpenAI client
+# ---------------------------------------------------------------------------
+# `config` is imported transitively from utils.database and is loaded from
+# secrets.yaml at module import time.
 OPENAI_API_KEY = config['OPENAI_API_KEY']
-    
-# Patch the OpenAI client
+
+# Wrap the OpenAI client with `instructor` so we can pass `response_model=`
+# Pydantic schemas and receive validated, typed responses instead of raw text.
 client = instructor.from_openai(OpenAI(api_key=OPENAI_API_KEY))
 
 app = FastAPI()
 
-# Configure CORS to allow all origins
+# Allow all origins so the frontend dashboard (hosted separately) can call
+# this API from any domain. Tighten this in production by listing trusted origins.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -62,9 +85,33 @@ app.add_middleware(
 
 @app.post("/convert-nl-to-sql")
 async def convert_nl_to_sql(data: dict, db: Session = Depends(get_demo_db)):
+    """
+    Translate a natural-language question into SQL, execute it, and return
+    a structured analytics response.
+
+    The pipeline runs in four stages:
+        1. Ask the LLM to pick the SQL tables relevant to the user's prompt.
+        2. Pull schema (column names + types) for the chosen tables.
+        3. Ask the LLM, given the focused schema, to emit:
+           - a SQL query,
+           - a plain-English answer,
+           - a suggested chart type,
+           - JSON visualization data.
+        4. Execute the SQL against the connected database and return the
+           combined payload to the caller.
+
+    Args:
+        data: JSON body of the form ``{"prompt": "<user question>"}``.
+        db:   Inspector for the demo database, supplied via FastAPI's DI.
+
+    Returns:
+        JSONResponse with keys ``sql_query``, ``natural_language``,
+        ``chart_type`` and ``visualization_data``.
+    """
     prompt = data['prompt']
 
     try:
+        # Materialise the full list of tables so the LLM can choose from them.
         table_names = "\n".join(db.get_table_names())
 
         system = f"""Identify and return the names of ALL SQL tables that are directly relevant to the input prompt: "{prompt}". 
@@ -102,10 +149,13 @@ async def convert_nl_to_sql(data: dict, db: Session = Depends(get_demo_db)):
             # raise HTTPException(status_code=500, detail=str(e))
             logger.error("This query is unrelated to the data and there is no data available to answer it")
         
-        # Assuming db is your database connection or engine
+        # Build an inspector once and reuse it. `db` can either be an Engine
+        # or an already-built Inspector, so we normalise both cases here.
         inspector = inspect(db.engine if hasattr(db, 'engine') else db)
 
-        # Get schema information for relevant tables, including data types
+        # Resolve column names + types for each table the LLM identified.
+        # We feed this enriched schema back to the LLM in the next call so it
+        # can emit a query that is grounded in the real database structure.
         table_schemas = {}
         for table_name in relevant_tables:
             try:
@@ -119,6 +169,9 @@ async def convert_nl_to_sql(data: dict, db: Session = Depends(get_demo_db)):
                 logger.error(f"Unexpected error fetching schema for table {table_name}: {e}")
                 table_schemas[table_name] = []
 
+        # Fallback: if the SQLAlchemy inspector returned nothing (e.g. the
+        # dialect didn't expose introspection), drop down to information_schema
+        # via raw SQL — that table is portable across most RDBMS backends.
         if not any(table_schemas.values()):
             for table_name in relevant_tables:
                 try:
@@ -211,6 +264,10 @@ async def convert_nl_to_sql(data: dict, db: Session = Depends(get_demo_db)):
 
 @app.get("/tables_in_creation_order/")
 async def tables_in_creation_order(db: Session = Depends(get_db)):
+    """
+    Return the names of all tables in the connected BI database in the order
+    the SQLAlchemy inspector reports them (typically creation order).
+    """
     try:
         tables_order = get_tables_in_creation_order(db)
         return JSONResponse(content={"tables_in_creation_order": tables_order}, status_code=200)
@@ -219,6 +276,10 @@ async def tables_in_creation_order(db: Session = Depends(get_db)):
 
 @app.get("/execute_query/")
 async def execute_query(table_name: str, db: Session = Depends(get_db)):
+    """
+    Return a small preview (first 5 rows) of the requested table as JSON,
+    useful for the frontend to render a sample of the data.
+    """
     try:
         result_df = query_to_dataframe(db, table_name)
         json_result = result_df.to_json(orient="records")
@@ -228,6 +289,18 @@ async def execute_query(table_name: str, db: Session = Depends(get_db)):
 
 @app.post("/createtable/")
 async def create_table_csv(table_name: str = Form(...), file: UploadFile = File(...)):
+    """
+    Accept a multipart CSV upload and persist its contents as a table in the
+    demo database. If the table already exists, rows are appended.
+
+    Args:
+        table_name: Destination table name supplied as a form field.
+        file:       The CSV file uploaded by the client.
+
+    Returns:
+        JSONResponse describing the table name, uploaded filename and number
+        of rows inserted.
+    """
     try:
         contents = await file.read()
         df = pd.read_csv(io.StringIO(contents.decode('utf-8')))
@@ -250,6 +323,18 @@ async def create_table_csv(table_name: str = Form(...), file: UploadFile = File(
     
 @app.get("/questions/")
 def generate_questions(table_name: str):
+    """
+    Suggest four analytical questions a user might ask about the contents of
+    the given table. Powered by the LLM and intended to bootstrap the user's
+    exploration when they don't know what to ask first.
+
+    Args:
+        table_name: Name of the table to generate questions for.
+
+    Returns:
+        JSONResponse containing a list of four ``{actual_question,
+        summary_question}`` dictionaries.
+    """
     try:
         df = read_table(table_name)
         
@@ -295,7 +380,30 @@ def generate_questions(table_name: str):
 @app.post("/bi-dashboard-data")
 async def bi_data(data: dict, db_config: DatabaseConfig = Depends(), db: Session = Depends(get_bi_db)):
     """
-    Endpoint to retrieve BI dashboard data based on user roles.
+    Generate SQL queries for a BI dashboard tailored to one or more roles.
+
+    Each supported role (marketing, vip, fraud, product, finance, support,
+    retail) has a curated set of KPI questions defined inline. The endpoint:
+
+        1. Validates the requested roles,
+        2. Bundles their questions,
+        3. Uses the LLM to identify relevant tables and generate
+           PostgreSQL-compatible queries for each KPI,
+        4. Returns the list of generated queries to the caller.
+
+    Passing the special role ``"overview"`` triggers an admin-style response
+    that walks every role in batches of three.
+
+    Args:
+        data: JSON body of the form ``{"role": "marketing"}`` or
+              ``{"roles": ["marketing", "fraud"]}``.
+        db_config: User-supplied database connection details
+                   (resolved by FastAPI as query/body params).
+        db:   Inspector for the target BI database, supplied via DI.
+
+    Returns:
+        Dictionary containing the requested roles and the SQL queries
+        generated for each KPI.
     """
     request_id = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     log_context = {'request_id': request_id}
@@ -589,4 +697,6 @@ async def process_batch(
         logger.error(f"Unexpected error in process_batch: {str(e)}", extra=log_context)
         raise HTTPException(status_code=500, detail="Failed to process batch")
 
+# AWS Lambda entry point. When deployed via SAM (see template.yaml at the
+# repo root), Mangum adapts the ASGI app to Lambda's invocation model.
 handler = Mangum(app)

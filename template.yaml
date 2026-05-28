@@ -1,12 +1,12 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Bounty python backend on Lambda
+Description: Pythia python backend on Lambda
 
 Resources:
   Function:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: 'bounty-python-backend'
+      FunctionName: 'pythia-python-backend'
       Timeout: 600
       CodeUri: app
       AutoPublishAlias: live

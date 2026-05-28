@@ -1,6 +1,13 @@
-__pycache__/ 
+__pycache__/
 .env
 *.csv
 *.xlsx
 *.ipynb
 .aws-sam/
+.DS_Store
+
+# Secrets — never commit
+secrets.yaml
+secrets.yml
+*.secrets.yaml
+*.secrets.yml
